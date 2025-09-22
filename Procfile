@@ -1,1 +1,1 @@
-web: python FalseTrue.py
+web: gunicorn FalseTrue:app
