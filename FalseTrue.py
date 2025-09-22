@@ -8,16 +8,13 @@ import sqlite3
 from flask import Flask, request
 import telebot
 
-# =========================
+# -------------------------
 # Config
-# =========================
-BOT_TOKEN = "8384623873:AAH1BFcheGw_Mwzkt2ighSm4JAyqtODQ3Pg"
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://your-app.onrender.com/
+# -------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://python-user-ye8k2.onrender.com/
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
-# =========================
-# Storage Paths
-# =========================
 DOWNLOAD_DIR = "downloads"
 EXTRACT_DIR = "extracted_files"
 DB_FILE = "data.db"
@@ -25,9 +22,9 @@ DB_FILE = "data.db"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(EXTRACT_DIR, exist_ok=True)
 
-# =========================
-# Database Functions
-# =========================
+# -------------------------
+# Database functions
+# -------------------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -51,9 +48,9 @@ def search_db(query):
     conn.close()
     return results
 
-# =========================
-# File Handling
-# =========================
+# -------------------------
+# File handling
+# -------------------------
 def convert_google_drive_link(url: str) -> str:
     if "drive.google.com" in url:
         if "id=" in url:
@@ -108,25 +105,24 @@ def load_csv_to_db():
                 try:
                     df = pd.read_csv(csv_path, dtype=str, low_memory=False)
                     df = df.fillna("")
-                    # Fix scientific notation numbers
                     df = df.applymap(lambda x: str(x).replace(".0", "") if "E+" in str(x) or "e+" in str(x) else str(x))
                     rows = df.astype(str).apply(lambda row: ", ".join(row), axis=1).tolist()
                     insert_rows(rows)
                 except Exception as e:
                     print(f"⚠️ Error reading {csv_path}: {e}")
 
-# =========================
-# Bot Handlers
-# =========================
+# -------------------------
+# Bot handlers
+# -------------------------
 @bot.message_handler(commands=["start"])
 def start_command(message):
     welcome_text = (
         "🤖 *Welcome to CSV Search Bot!*\n\n"
-        "📂 *Import Data:* `/import <link>` → Download & extract ZIP/RAR/7Z (Google Drive, Dropbox, direct URL)\n"
+        "📂 *Import Data:* `/import <link>` → Download & extract ZIP/RAR/7Z\n"
         "🔍 *Search Data:* `/search <keyword>` → Search all CSVs and return matching rows\n\n"
         "ℹ️ Notes:\n"
         "- Fixes numbers like `91...E+11` → `9123456789`\n"
-        "- Google Drive links auto-converted to direct download\n"
+        "- Google Drive links auto-converted\n"
         "- Telegram upload limit = 2GB → use `/import` for larger files"
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown")
@@ -172,9 +168,9 @@ def search_command(message):
         for row in results[:10]:
             bot.send_message(message.chat.id, row)
 
-# =========================
-# Flask App for Webhook
-# =========================
+# -------------------------
+# Flask app for webhook
+# -------------------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -188,9 +184,9 @@ def webhook():
     bot.process_new_updates([update])
     return "!", 200
 
-# =========================
-# Run Flask + Set Webhook
-# =========================
+# -------------------------
+# Run Flask + set webhook
+# -------------------------
 if __name__ == "__main__":
     if WEBHOOK_URL:
         bot.remove_webhook()
