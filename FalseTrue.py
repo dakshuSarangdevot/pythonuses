@@ -13,7 +13,9 @@ import telebot
 # -------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://python-user-ye8k2.onrender.com/
+
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+app = Flask(__name__)
 
 DOWNLOAD_DIR = "downloads"
 EXTRACT_DIR = "extracted_files"
@@ -171,18 +173,16 @@ def search_command(message):
 # -------------------------
 # Flask app for webhook
 # -------------------------
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "✅ Telegram CSV Search Bot is running!"
-
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     json_str = request.get_data().decode("utf-8")
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
     return "!", 200
+
+@app.route("/")
+def home():
+    return "✅ Telegram CSV Search Bot is running!"
 
 # -------------------------
 # Run Flask + set webhook
