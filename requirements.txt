@@ -1,4 +1,5 @@
 python-telegram-bot==20.6
 pandas
-rarfile
 py7zr
+rarfile
+python-dotenv
