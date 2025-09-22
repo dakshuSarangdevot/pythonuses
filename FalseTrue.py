@@ -152,15 +152,15 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Echo: {update.message.text}")
 
 # =========================
-# Minimal web server for Render Web Service
+# Minimal web server for Render Web Service (UTF-8 fixed)
 # =========================
 def start_web_server():
     class SimpleHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
-            self.send_header("Content-type", "text/plain")
+            self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.wfile.write(b"🤖 Bot is running")
+            self.wfile.write("🤖 Bot is running".encode("utf-8"))
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), SimpleHandler)
     logger.info(f"Web server running on port {port}")
