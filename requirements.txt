@@ -3,3 +3,4 @@ pandas
 py7zr
 rarfile
 flask
+requests
