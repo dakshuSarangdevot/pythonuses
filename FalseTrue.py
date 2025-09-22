@@ -12,8 +12,7 @@ import telebot
 # Config
 # =========================
 BOT_TOKEN = "8384623873:AAH1BFcheGw_Mwzkt2ighSm4JAyqtODQ3Pg"
-WEBHOOK_URL = f"/{BOT_TOKEN}"  # Telegram will POST updates to this path
-
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://your-app.onrender.com/
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
 # =========================
@@ -86,15 +85,19 @@ def download_file(url, chat_id):
     return local_filename
 
 def extract_archive(file_path):
-    if zipfile.is_zipfile(file_path):
-        with zipfile.ZipFile(file_path, "r") as zf:
-            zf.extractall(EXTRACT_DIR)
-    elif rarfile.is_rarfile(file_path):
-        with rarfile.RarFile(file_path, "r") as rf:
-            rf.extractall(EXTRACT_DIR)
-    elif file_path.endswith(".7z"):
-        with py7zr.SevenZipFile(file_path, "r") as z:
-            z.extractall(EXTRACT_DIR)
+    try:
+        if zipfile.is_zipfile(file_path):
+            with zipfile.ZipFile(file_path, "r") as zf:
+                zf.extractall(EXTRACT_DIR)
+        elif rarfile.is_rarfile(file_path):
+            with rarfile.RarFile(file_path, "r") as rf:
+                rf.extractall(EXTRACT_DIR)
+        elif file_path.endswith(".7z"):
+            with py7zr.SevenZipFile(file_path, "r") as z:
+                z.extractall(EXTRACT_DIR)
+    except RuntimeError:
+        return False  # Possibly password-protected
+    return True
 
 def load_csv_to_db():
     init_db()
@@ -142,7 +145,12 @@ def import_command(message):
     try:
         file_path = download_file(url, message.chat.id)
         bot.send_message(message.chat.id, f"✅ File downloaded: `{file_path}`\n⏳ Extracting now...", parse_mode="Markdown")
-        extract_archive(file_path)
+
+        success = extract_archive(file_path)
+        if not success:
+            bot.send_message(message.chat.id, "⚠️ Archive is password-protected or cannot be opened.")
+            return
+
         bot.send_message(message.chat.id, "✅ Archive extracted.\n⏳ Loading CSV data into database...")
         load_csv_to_db()
         bot.send_message(message.chat.id, "🎉 Data imported successfully! Use `/search <keyword>` to find entries.")
@@ -173,7 +181,7 @@ app = Flask(__name__)
 def home():
     return "✅ Telegram CSV Search Bot is running!"
 
-@app.route(WEBHOOK_URL, methods=["POST"])
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     json_str = request.get_data().decode("utf-8")
     update = telebot.types.Update.de_json(json_str)
@@ -181,19 +189,13 @@ def webhook():
     return "!", 200
 
 # =========================
-# Set webhook automatically (Run once)
-# =========================
-@app.before_first_request
-def set_webhook():
-    url = os.environ.get("WEBHOOK_URL")  # e.g., https://your-app.onrender.com/<token>
-    if url:
-        bot.remove_webhook()
-        bot.set_webhook(url=url+BOT_TOKEN)
-        print(f"Webhook set to {url+BOT_TOKEN}")
-
-# =========================
-# Run Flask
+# Run Flask + Set Webhook
 # =========================
 if __name__ == "__main__":
+    if WEBHOOK_URL:
+        bot.remove_webhook()
+        bot.set_webhook(url=WEBHOOK_URL + BOT_TOKEN)
+        print(f"Webhook set to {WEBHOOK_URL + BOT_TOKEN}")
+
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
