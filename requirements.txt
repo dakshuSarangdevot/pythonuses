@@ -4,3 +4,4 @@ pandas
 requests
 rarfile
 py7zr
+gunicorn
