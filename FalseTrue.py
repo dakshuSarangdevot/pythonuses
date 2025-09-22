@@ -7,16 +7,20 @@ import py7zr
 import pandas as pd
 import sqlite3
 import telebot
+from flask import Flask
+import threading
 
 # =========================
 # CONFIGURATION
 # =========================
-BOT_TOKEN = "8384623873:AAH1BFcheGw_Mwzkt2ighSm4JAyqtODQ3Pg"  # Your bot token
+BOT_TOKEN = "8384623873:AAH1BFcheGw_Mwzkt2ighSm4JAyqtODQ3Pg"
 DATA_DIR = "extracted_files"
 DB_FILE = "data.db"
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
 bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 
 # =========================
 # Database setup
@@ -24,7 +28,6 @@ bot = telebot.TeleBot(BOT_TOKEN)
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 cursor = conn.cursor()
 
-# Table to store CSV data dynamically
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS csv_data (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,11 +71,9 @@ def load_csv_to_db():
             if file.endswith(".csv"):
                 path = os.path.join(root, file)
                 try:
-                    # Read CSV in chunks
                     for chunk in pd.read_csv(path, dtype=str, chunksize=100000):
                         # Fix scientific notation numbers
                         chunk = chunk.applymap(lambda x: '{0:.0f}'.format(float(x)) if isinstance(x, str) and 'E' in x else x)
-                        # Insert rows into SQLite
                         for _, row in chunk.iterrows():
                             row_text = ", ".join(row.values)
                             cursor.execute("INSERT INTO csv_data (row_text) VALUES (?)", (row_text,))
@@ -120,7 +121,24 @@ def handle_search(message):
         bot.reply_to(message, f"❌ Error searching database: {e}")
 
 # =========================
-# Start bot
+# Flask route
 # =========================
-print("✅ Bot is running...")
-bot.infinity_polling()
+@app.route("/")
+def home():
+    return "Bot is running!"
+
+# =========================
+# Run Telegram bot in thread
+# =========================
+def run_bot():
+    print("✅ Telegram bot started...")
+    bot.infinity_polling()
+
+# =========================
+# Start everything
+# =========================
+if __name__ == "__main__":
+    threading.Thread(target=run_bot).start()
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Flask server running on port {port}")
+    app.run(host="0.0.0.0", port=port)
