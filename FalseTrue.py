@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import logging
 import pandas as pd
@@ -6,6 +7,8 @@ import rarfile
 import py7zr
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 
 # =========================
 # Credentials
@@ -149,11 +152,29 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Echo: {update.message.text}")
 
 # =========================
+# Minimal web server for Render Web Service
+# =========================
+def start_web_server():
+    class SimpleHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"🤖 Bot is running")
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    logger.info(f"Web server running on port {port}")
+    server.serve_forever()
+
+# =========================
 # Main
 # =========================
 def main():
     print("🤖 Bot is starting...")  # Console log for Pydroid/Render
     logger.info("🤖 Bot has started successfully!")
+
+    # Start web server in a separate thread
+    threading.Thread(target=start_web_server, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
