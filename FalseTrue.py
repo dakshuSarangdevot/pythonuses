@@ -1,144 +1,192 @@
-#!/usr/bin/env python3
 import os
-import io
+import threading
 import zipfile
 import rarfile
 import py7zr
 import pandas as pd
+import requests
 import sqlite3
-import telebot
 from flask import Flask
-import threading
+import telebot
 
 # =========================
-# CONFIGURATION
+# Telegram Bot Config
 # =========================
 BOT_TOKEN = "8384623873:AAH1BFcheGw_Mwzkt2ighSm4JAyqtODQ3Pg"
-DATA_DIR = "extracted_files"
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# =========================
+# Storage Paths
+# =========================
+DOWNLOAD_DIR = "downloads"
+EXTRACT_DIR = "extracted_files"
 DB_FILE = "data.db"
 
-os.makedirs(DATA_DIR, exist_ok=True)
-
-bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+os.makedirs(EXTRACT_DIR, exist_ok=True)
 
 # =========================
-# Database setup
+# SQLite Functions
 # =========================
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-cursor = conn.cursor()
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DROP TABLE IF EXISTS data")
+    c.execute("CREATE TABLE data (row TEXT)")
+    conn.commit()
+    conn.close()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS csv_data (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    row_text TEXT
-)
-""")
-conn.commit()
+def insert_rows(rows):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.executemany("INSERT INTO data (row) VALUES (?)", [(r,) for r in rows])
+    conn.commit()
+    conn.close()
+
+def search_db(query):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT row FROM data WHERE row LIKE ?", (f"%{query}%",))
+    results = [r[0] for r in c.fetchall()]
+    conn.close()
+    return results
 
 # =========================
-# Extraction functions
+# File Handling
 # =========================
-def extract_file(file_path):
-    extracted_files = []
-    filename = os.path.basename(file_path)
-    try:
-        if filename.endswith(".zip"):
-            with zipfile.ZipFile(file_path, 'r') as z:
-                z.extractall(DATA_DIR)
-                extracted_files = z.namelist()
-        elif filename.endswith((".rar", ".rar.ab", ".rar.ac", ".rar.ad")):
-            with rarfile.RarFile(file_path) as r:
-                r.extractall(DATA_DIR)
-                extracted_files = r.namelist()
-        elif filename.endswith(".7z"):
-            with py7zr.SevenZipFile(file_path, mode='r') as s:
-                s.extractall(path=DATA_DIR)
-                extracted_files = s.getnames()
+def convert_google_drive_link(url: str) -> str:
+    """Converts a Google Drive share link to a direct download link."""
+    if "drive.google.com" in url:
+        if "id=" in url:
+            file_id = url.split("id=")[1].split("&")[0]
+        elif "/d/" in url:
+            file_id = url.split("/d/")[1].split("/")[0]
         else:
-            return False, []
-        return True, extracted_files
-    except Exception as e:
-        print(f"Error extracting {file_path}: {e}")
-        return False, []
+            return url
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+    return url
 
-# =========================
-# Load CSVs into SQLite
-# =========================
+def download_file(url, chat_id):
+    local_filename = os.path.join(DOWNLOAD_DIR, url.split("/")[-1])
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        total_size = int(r.headers.get("content-length", 0))
+        downloaded = 0
+        last_percent = 0
+        with open(local_filename, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        percent = int(downloaded * 100 / total_size)
+                        if percent >= last_percent + 10:  # update every 10%
+                            bot.send_message(chat_id, f"⬇️ Download progress: {percent}%")
+                            last_percent = percent
+    return local_filename
+
+def extract_archive(file_path):
+    if zipfile.is_zipfile(file_path):
+        with zipfile.ZipFile(file_path, "r") as zf:
+            zf.extractall(EXTRACT_DIR)
+    elif rarfile.is_rarfile(file_path):
+        with rarfile.RarFile(file_path, "r") as rf:
+            rf.extractall(EXTRACT_DIR)
+    elif file_path.endswith(".7z"):
+        with py7zr.SevenZipFile(file_path, "r") as z:
+            z.extractall(EXTRACT_DIR)
+
 def load_csv_to_db():
-    for root, dirs, files in os.walk(DATA_DIR):
+    init_db()
+    for root, _, files in os.walk(EXTRACT_DIR):
         for file in files:
             if file.endswith(".csv"):
-                path = os.path.join(root, file)
+                csv_path = os.path.join(root, file)
                 try:
-                    for chunk in pd.read_csv(path, dtype=str, chunksize=100000):
-                        # Fix scientific notation numbers
-                        chunk = chunk.applymap(lambda x: '{0:.0f}'.format(float(x)) if isinstance(x, str) and 'E' in x else x)
-                        for _, row in chunk.iterrows():
-                            row_text = ", ".join(row.values)
-                            cursor.execute("INSERT INTO csv_data (row_text) VALUES (?)", (row_text,))
-                    conn.commit()
+                    df = pd.read_csv(csv_path, dtype=str, low_memory=False)
+                    df = df.fillna("")
+                    # Fix scientific notation numbers
+                    df = df.applymap(lambda x: str(x).replace(".0", "") if "E+" in str(x) or "e+" in str(x) else str(x))
+                    rows = df.astype(str).apply(lambda row: ", ".join(row), axis=1).tolist()
+                    insert_rows(rows)
                 except Exception as e:
-                    print(f"Error reading CSV {path}: {e}")
+                    print(f"⚠️ Error reading {csv_path}: {e}")
 
 # =========================
-# Telegram Handlers
+# Telegram Bot Handlers
 # =========================
-@bot.message_handler(content_types=['document'])
-def handle_file(message):
+@bot.message_handler(commands=["start"])
+def start_command(message):
+    welcome_text = (
+        "🤖 *Welcome to CSV Search Bot!*\n\n"
+        "Here’s what I can do for you:\n\n"
+        "📂 *Import Data*\n"
+        "`/import <link>` → Download & extract a ZIP/RAR/7Z archive from Google Drive, Dropbox, or direct URL.\n\n"
+        "🔍 *Search Data*\n"
+        "`/search <keyword>` → Search all extracted CSVs and return matching rows.\n\n"
+        "ℹ️ *Notes*\n"
+        "- Supports ZIP, RAR, 7Z archives.\n"
+        "- Auto-fixes numbers like `91...E+11` → `9123456789`.\n"
+        "- Telegram file limit = 2 GB → Use `/import` for larger files.\n"
+        "- Google Drive links are auto-converted to direct download.\n\n"
+        "✨ *Tip*: Use short, specific keywords for best search results."
+    )
+    bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown")
+
+@bot.message_handler(commands=["import"])
+def import_command(message):
     try:
-        file_info = bot.get_file(message.document.file_id)
-        saved_path = os.path.join(DATA_DIR, message.document.file_name)
-        downloaded_file = bot.download_file(file_info.file_path)
-        with open(saved_path, 'wb') as f:
-            f.write(downloaded_file)
-        
-        success, extracted = extract_file(saved_path)
-        if success:
-            load_csv_to_db()
-            bot.reply_to(message, f"✅ File extracted and data loaded! {len(extracted)} files found.")
-        else:
-            bot.reply_to(message, "❌ Failed to extract the file.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error processing file: {e}")
-
-@bot.message_handler(commands=['search'])
-def handle_search(message):
-    query = message.text.replace('/search', '').strip()
-    if not query:
-        bot.reply_to(message, "⚠️ Please provide a name to search.")
+        url = message.text.split(" ", 1)[1].strip()
+    except IndexError:
+        bot.reply_to(message, "⚠️ Please provide a valid link. Example:\n`/import https://example.com/file.zip`", parse_mode="Markdown")
         return
-    
+
+    # Auto-convert Google Drive link
+    url = convert_google_drive_link(url)
+
+    bot.reply_to(message, "⏳ Starting download... please wait.")
     try:
-        cursor.execute("SELECT row_text FROM csv_data WHERE row_text LIKE ?", (f"%{query}%",))
-        results = cursor.fetchall()
-        if results:
-            for r in results[:10]:  # limit 10 results per message
-                bot.send_message(message.chat.id, r[0])
-        else:
-            bot.reply_to(message, "❌ No match found.")
+        file_path = download_file(url, message.chat.id)
+        bot.reply_to(message, f"✅ File downloaded: `{file_path}`\n\n⏳ Extracting now...", parse_mode="Markdown")
+
+        extract_archive(file_path)
+        bot.reply_to(message, "✅ Archive extracted.\n\n⏳ Loading CSV data into database...")
+
+        load_csv_to_db()
+        bot.reply_to(message, "🎉 Data imported successfully! You can now use `/search <keyword>` to find entries.")
     except Exception as e:
-        bot.reply_to(message, f"❌ Error searching database: {e}")
+        bot.reply_to(message, f"❌ Import failed: {e}")
+
+@bot.message_handler(commands=["search"])
+def search_command(message):
+    try:
+        query = message.text.split(" ", 1)[1]
+    except IndexError:
+        bot.reply_to(message, "⚠️ Please provide a search keyword. Example:\n`/search John Doe`", parse_mode="Markdown")
+        return
+
+    results = search_db(query)
+    if not results:
+        bot.reply_to(message, "❌ No matches found.")
+    else:
+        for row in results[:10]:  # Limit to 10 results
+            bot.send_message(message.chat.id, row)
 
 # =========================
-# Flask route
+# Flask Web Service (for Render)
 # =========================
+app = Flask(__name__)
+
 @app.route("/")
 def home():
-    return "Bot is running!"
+    return "✅ Telegram CSV Search Bot is running!"
 
-# =========================
-# Run Telegram bot in thread
-# =========================
 def run_bot():
-    print("✅ Telegram bot started...")
     bot.infinity_polling()
 
-# =========================
-# Start everything
-# =========================
+# Run bot in background thread
+threading.Thread(target=run_bot).start()
+
 if __name__ == "__main__":
-    threading.Thread(target=run_bot).start()
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Flask server running on port {port}")
     app.run(host="0.0.0.0", port=port)
