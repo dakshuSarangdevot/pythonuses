@@ -1,189 +1,126 @@
 #!/usr/bin/env python3
 import os
-import logging
-import pandas as pd
+import io
 import zipfile
 import rarfile
 import py7zr
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
+import pandas as pd
+import sqlite3
+import telebot
 
 # =========================
-# Credentials
+# CONFIGURATION
 # =========================
-BOT_TOKEN = "8449504199:AAEk3b780z2Ts8MS2YTPqdcZs090DO4ygeM"
-API_ID = 23627016
-API_HASH = "d8c9b9dabe3bc5d9905ba5c0160ab5a7"
-ADMIN_ID = 8343668073
-DATA_DIR = "data"
+BOT_TOKEN = "8384623873:AAH1BFcheGw_Mwzkt2ighSm4JAyqtODQ3Pg"  # Your bot token
+DATA_DIR = "extracted_files"
+DB_FILE = "data.db"
 
 os.makedirs(DATA_DIR, exist_ok=True)
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # =========================
-# Logging setup
+# Database setup
 # =========================
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+cursor = conn.cursor()
+
+# Table to store CSV data dynamically
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS csv_data (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    row_text TEXT
+)
+""")
+conn.commit()
 
 # =========================
-# Utility functions
+# Extraction functions
 # =========================
-def fix_extension(file_path):
-    name, ext = os.path.splitext(file_path)
-    ext = ext.lower()
-    if ext not in [".zip", ".rar", ".7z", ".csv"]:
-        new_ext = ".zip" if "zip" in ext else ".rar" if "rar" in ext else ".zip"
-        new_file = name + new_ext
-        os.rename(file_path, new_file)
-        return new_file
-    return file_path
-
-def extract_file(file_path, extract_dir):
-    file_path = fix_extension(file_path)
+def extract_file(file_path):
+    extracted_files = []
+    filename = os.path.basename(file_path)
     try:
-        if file_path.lower().endswith(".zip"):
-            with zipfile.ZipFile(file_path, "r") as zip_ref:
-                zip_ref.extractall(extract_dir)
-        elif file_path.lower().endswith(".rar"):
-            with rarfile.RarFile(file_path, "r") as rar_ref:
-                rar_ref.extractall(extract_dir)
-        elif file_path.lower().endswith(".7z"):
-            with py7zr.SevenZipFile(file_path, "r") as sz:
-                sz.extractall(path=extract_dir)
+        if filename.endswith(".zip"):
+            with zipfile.ZipFile(file_path, 'r') as z:
+                z.extractall(DATA_DIR)
+                extracted_files = z.namelist()
+        elif filename.endswith((".rar", ".rar.ab", ".rar.ac", ".rar.ad")):
+            with rarfile.RarFile(file_path) as r:
+                r.extractall(DATA_DIR)
+                extracted_files = r.namelist()
+        elif filename.endswith(".7z"):
+            with py7zr.SevenZipFile(file_path, mode='r') as s:
+                s.extractall(path=DATA_DIR)
+                extracted_files = s.getnames()
+        else:
+            return False, []
+        return True, extracted_files
     except Exception as e:
-        logger.error("Extraction failed for %s: %s", file_path, e)
-        return False
-    return True
+        print(f"Error extracting {file_path}: {e}")
+        return False, []
 
-def load_csvs_recursive(root_dir):
-    csv_files = []
-    for dirpath, _, filenames in os.walk(root_dir):
-        for f in filenames:
-            if f.lower().endswith(".csv"):
-                csv_files.append(os.path.join(dirpath, f))
-    return csv_files
-
-def search_csvs(keyword):
-    results = []
-    csv_paths = load_csvs_recursive(DATA_DIR)
-    for csv_file in csv_paths:
-        try:
-            for chunk in pd.read_csv(csv_file, chunksize=50000, dtype=str, encoding="utf-8", on_bad_lines="skip"):
-                chunk.fillna("", inplace=True)
-                mask = chunk.apply(lambda row: row.astype(str).str.contains(keyword, case=False, na=False)).any(axis=1)
-                for _, row in chunk[mask].iterrows():
-                    formatted = []
-                    for v in row.values:
-                        v = str(v)
-                        if "E+" in v or "e+" in v:
-                            try:
-                                v = str(int(float(v)))
-                            except:
-                                pass
-                        formatted.append(v)
-                    results.append("\n".join(formatted))
-        except Exception as e:
-            logger.error("Error reading CSV %s: %s", csv_file, e)
-    return results
+# =========================
+# Load CSVs into SQLite
+# =========================
+def load_csv_to_db():
+    for root, dirs, files in os.walk(DATA_DIR):
+        for file in files:
+            if file.endswith(".csv"):
+                path = os.path.join(root, file)
+                try:
+                    # Read CSV in chunks
+                    for chunk in pd.read_csv(path, dtype=str, chunksize=100000):
+                        # Fix scientific notation numbers
+                        chunk = chunk.applymap(lambda x: '{0:.0f}'.format(float(x)) if isinstance(x, str) and 'E' in x else x)
+                        # Insert rows into SQLite
+                        for _, row in chunk.iterrows():
+                            row_text = ", ".join(row.values)
+                            cursor.execute("INSERT INTO csv_data (row_text) VALUES (?)", (row_text,))
+                    conn.commit()
+                except Exception as e:
+                    print(f"Error reading CSV {path}: {e}")
 
 # =========================
 # Telegram Handlers
 # =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Kaiivaro bhagwan 🙏\nWelcome to the bot!")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        "Available commands:\n"
-        "/start - Start the bot\n"
-        "/help - Show this help message\n"
-        "/list - List all CSV files\n"
-        "/search <keyword> - Search CSV files\n"
-        "/upload - Upload a file (ZIP/RAR/CSV)"
-    )
-    await update.message.reply_text(help_text)
-
-async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    csv_files = load_csvs_recursive(DATA_DIR)
-    if csv_files:
-        reply = "CSV files:\n" + "\n".join(csv_files)
-    else:
-        reply = "No CSV files found."
-    await update.message.reply_text(reply)
-
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /search <keyword>")
-        return
-    keyword = " ".join(context.args)
-    results = search_csvs(keyword)
-    # Notify admin
+@bot.message_handler(content_types=['document'])
+def handle_file(message):
     try:
-        admin_msg = f"User: @{update.message.from_user.username or 'Unknown'} ({update.message.from_user.id})\nCommand: /search {keyword}"
-        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg)
-    except:
-        logger.warning("Admin notification failed")
-    if results:
-        for r in results[:10]:
-            await update.message.reply_text(r)
-        if len(results) > 10:
-            await update.message.reply_text(f"...and {len(results)-10} more results")
-    else:
-        await update.message.reply_text("No matches found.")
-
-async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.document:
-        file = update.message.document
-        file_path = os.path.join(DATA_DIR, file.file_name)
-        await file.get_file().download_to_drive(file_path)
-        success = extract_file(file_path, DATA_DIR)
+        file_info = bot.get_file(message.document.file_id)
+        saved_path = os.path.join(DATA_DIR, message.document.file_name)
+        downloaded_file = bot.download_file(file_info.file_path)
+        with open(saved_path, 'wb') as f:
+            f.write(downloaded_file)
+        
+        success, extracted = extract_file(saved_path)
         if success:
-            await update.message.reply_text(f"File {file.file_name} uploaded and extracted successfully!")
+            load_csv_to_db()
+            bot.reply_to(message, f"✅ File extracted and data loaded! {len(extracted)} files found.")
         else:
-            await update.message.reply_text(f"⚠️ Could not extract {file.file_name}. Please check the format.")
-    else:
-        await update.message.reply_text("Please send a document (ZIP/RAR/CSV).")
+            bot.reply_to(message, "❌ Failed to extract the file.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error processing file: {e}")
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message:
-        logger.info("Received message: %s", update.message.text)
-        await update.message.reply_text(f"Echo: {update.message.text}")
-
-# =========================
-# Minimal web server for Render Web Service (UTF-8 fixed)
-# =========================
-def start_web_server():
-    class SimpleHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write("🤖 Bot is running".encode("utf-8"))
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
-    logger.info(f"Web server running on port {port}")
-    server.serve_forever()
+@bot.message_handler(commands=['search'])
+def handle_search(message):
+    query = message.text.replace('/search', '').strip()
+    if not query:
+        bot.reply_to(message, "⚠️ Please provide a name to search.")
+        return
+    
+    try:
+        cursor.execute("SELECT row_text FROM csv_data WHERE row_text LIKE ?", (f"%{query}%",))
+        results = cursor.fetchall()
+        if results:
+            for r in results[:10]:  # limit 10 results per message
+                bot.send_message(message.chat.id, r[0])
+        else:
+            bot.reply_to(message, "❌ No match found.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error searching database: {e}")
 
 # =========================
-# Main
+# Start bot
 # =========================
-def main():
-    print("🤖 Bot is starting...")  # Console log for Pydroid/Render
-    logger.info("🤖 Bot has started successfully!")
-
-    # Start web server in a separate thread
-    threading.Thread(target=start_web_server, daemon=True).start()
-
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("list", list_files))
-    app.add_handler(CommandHandler("search", search))
-    app.add_handler(MessageHandler(filters.Document.ALL, upload_file))
-    app.add_handler(MessageHandler(filters.ALL, echo))
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+print("✅ Bot is running...")
+bot.infinity_polling()
