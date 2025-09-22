@@ -1,19 +1,20 @@
 import os
-import threading
 import zipfile
 import rarfile
 import py7zr
 import pandas as pd
 import requests
 import sqlite3
-from flask import Flask
+from flask import Flask, request
 import telebot
 
 # =========================
-# Telegram Bot Config
+# Config
 # =========================
 BOT_TOKEN = "8384623873:AAH1BFcheGw_Mwzkt2ighSm4JAyqtODQ3Pg"
-bot = telebot.TeleBot(BOT_TOKEN)
+WEBHOOK_URL = f"/{BOT_TOKEN}"  # Telegram will POST updates to this path
+
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
 # =========================
 # Storage Paths
@@ -26,7 +27,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(EXTRACT_DIR, exist_ok=True)
 
 # =========================
-# SQLite Functions
+# Database Functions
 # =========================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -55,7 +56,6 @@ def search_db(query):
 # File Handling
 # =========================
 def convert_google_drive_link(url: str) -> str:
-    """Converts a Google Drive share link to a direct download link."""
     if "drive.google.com" in url:
         if "id=" in url:
             file_id = url.split("id=")[1].split("&")[0]
@@ -80,7 +80,7 @@ def download_file(url, chat_id):
                     downloaded += len(chunk)
                     if total_size > 0:
                         percent = int(downloaded * 100 / total_size)
-                        if percent >= last_percent + 10:  # update every 10%
+                        if percent >= last_percent + 10:
                             bot.send_message(chat_id, f"⬇️ Download progress: {percent}%")
                             last_percent = percent
     return local_filename
@@ -113,23 +113,18 @@ def load_csv_to_db():
                     print(f"⚠️ Error reading {csv_path}: {e}")
 
 # =========================
-# Telegram Bot Handlers
+# Bot Handlers
 # =========================
 @bot.message_handler(commands=["start"])
 def start_command(message):
     welcome_text = (
         "🤖 *Welcome to CSV Search Bot!*\n\n"
-        "Here’s what I can do for you:\n\n"
-        "📂 *Import Data*\n"
-        "`/import <link>` → Download & extract a ZIP/RAR/7Z archive from Google Drive, Dropbox, or direct URL.\n\n"
-        "🔍 *Search Data*\n"
-        "`/search <keyword>` → Search all extracted CSVs and return matching rows.\n\n"
-        "ℹ️ *Notes*\n"
-        "- Supports ZIP, RAR, 7Z archives.\n"
-        "- Auto-fixes numbers like `91...E+11` → `9123456789`.\n"
-        "- Telegram file limit = 2 GB → Use `/import` for larger files.\n"
-        "- Google Drive links are auto-converted to direct download.\n\n"
-        "✨ *Tip*: Use short, specific keywords for best search results."
+        "📂 *Import Data:* `/import <link>` → Download & extract ZIP/RAR/7Z (Google Drive, Dropbox, direct URL)\n"
+        "🔍 *Search Data:* `/search <keyword>` → Search all CSVs and return matching rows\n\n"
+        "ℹ️ Notes:\n"
+        "- Fixes numbers like `91...E+11` → `9123456789`\n"
+        "- Google Drive links auto-converted to direct download\n"
+        "- Telegram upload limit = 2GB → use `/import` for larger files"
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown")
 
@@ -138,42 +133,39 @@ def import_command(message):
     try:
         url = message.text.split(" ", 1)[1].strip()
     except IndexError:
-        bot.reply_to(message, "⚠️ Please provide a valid link. Example:\n`/import https://example.com/file.zip`", parse_mode="Markdown")
+        bot.reply_to(message, "⚠️ Please provide a valid link.")
         return
 
-    # Auto-convert Google Drive link
     url = convert_google_drive_link(url)
+    bot.reply_to(message, "⏳ Starting download...")
 
-    bot.reply_to(message, "⏳ Starting download... please wait.")
     try:
         file_path = download_file(url, message.chat.id)
-        bot.reply_to(message, f"✅ File downloaded: `{file_path}`\n\n⏳ Extracting now...", parse_mode="Markdown")
-
+        bot.send_message(message.chat.id, f"✅ File downloaded: `{file_path}`\n⏳ Extracting now...", parse_mode="Markdown")
         extract_archive(file_path)
-        bot.reply_to(message, "✅ Archive extracted.\n\n⏳ Loading CSV data into database...")
-
+        bot.send_message(message.chat.id, "✅ Archive extracted.\n⏳ Loading CSV data into database...")
         load_csv_to_db()
-        bot.reply_to(message, "🎉 Data imported successfully! You can now use `/search <keyword>` to find entries.")
+        bot.send_message(message.chat.id, "🎉 Data imported successfully! Use `/search <keyword>` to find entries.")
     except Exception as e:
-        bot.reply_to(message, f"❌ Import failed: {e}")
+        bot.send_message(message.chat.id, f"❌ Import failed: {e}")
 
 @bot.message_handler(commands=["search"])
 def search_command(message):
     try:
         query = message.text.split(" ", 1)[1]
     except IndexError:
-        bot.reply_to(message, "⚠️ Please provide a search keyword. Example:\n`/search John Doe`", parse_mode="Markdown")
+        bot.reply_to(message, "⚠️ Please provide a search keyword.")
         return
 
     results = search_db(query)
     if not results:
         bot.reply_to(message, "❌ No matches found.")
     else:
-        for row in results[:10]:  # Limit to 10 results
+        for row in results[:10]:
             bot.send_message(message.chat.id, row)
 
 # =========================
-# Flask Web Service (for Render)
+# Flask App for Webhook
 # =========================
 app = Flask(__name__)
 
@@ -181,12 +173,27 @@ app = Flask(__name__)
 def home():
     return "✅ Telegram CSV Search Bot is running!"
 
-def run_bot():
-    bot.infinity_polling()
+@app.route(WEBHOOK_URL, methods=["POST"])
+def webhook():
+    json_str = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "!", 200
 
-# Run bot in background thread
-threading.Thread(target=run_bot).start()
+# =========================
+# Set webhook automatically (Run once)
+# =========================
+@app.before_first_request
+def set_webhook():
+    url = os.environ.get("WEBHOOK_URL")  # e.g., https://your-app.onrender.com/<token>
+    if url:
+        bot.remove_webhook()
+        bot.set_webhook(url=url+BOT_TOKEN)
+        print(f"Webhook set to {url+BOT_TOKEN}")
 
+# =========================
+# Run Flask
+# =========================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
