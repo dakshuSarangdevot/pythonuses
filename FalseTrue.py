@@ -12,7 +12,7 @@ import telebot
 # Config
 # -------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://python-user-ye8k2.onrender.com/
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # must end with /
 
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 app = Flask(__name__)
@@ -188,10 +188,9 @@ def home():
 # Run Flask + set webhook
 # -------------------------
 if __name__ == "__main__":
-    if WEBHOOK_URL:
-        bot.remove_webhook()
-        bot.set_webhook(url=WEBHOOK_URL + BOT_TOKEN)
-        print(f"Webhook set to {WEBHOOK_URL + BOT_TOKEN}")
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL + BOT_TOKEN)
+    print(f"Webhook set to {WEBHOOK_URL + BOT_TOKEN}")
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
