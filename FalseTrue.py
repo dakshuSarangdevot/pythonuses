@@ -21,21 +21,6 @@ CSV_FILE = os.path.join(DATA_FOLDER, "data.csv")
 app = Flask(__name__)
 
 # =====================
-# ROUTES
-# =====================
-
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ Telegram CSV Search Bot is running!", 200
-
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    json_str = request.get_data().decode("utf-8")
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "!", 200
-
-# =====================
 # UTILITIES
 # =====================
 
@@ -61,7 +46,6 @@ def extract_file(file_path, extract_to=DATA_FOLDER):
         raise ValueError("Unsupported file type")
 
 def load_csv():
-    # Automatically load first CSV found
     for root, _, files in os.walk(DATA_FOLDER):
         for file in files:
             if file.endswith(".csv"):
@@ -69,7 +53,6 @@ def load_csv():
     return None
 
 def clean_number(num_str):
-    """Fix numbers like 9.1E+11 → 9123456789"""
     try:
         if "E+" in str(num_str).upper():
             return str(int(float(num_str)))
@@ -81,24 +64,25 @@ def clean_number(num_str):
 # BOT HANDLERS
 # =====================
 
-@bot.message_handler(commands=["start"])
-def start(message):
+@bot.message_handler(commands=['start'])
+def start_message(message):
     welcome_text = (
         "👋 Welcome to the CSV Search Bot!\n\n"
-        "Here’s what I can do:\n"
-        "📂 /import <link> → Import and extract data from Google Drive or direct link\n"
-        "🔎 /search <name> → Find a row in the extracted CSV (exact match)\n"
-        "ℹ️ /start → Show this help message again\n\n"
-        "⚡ Tip: Large archives (GBs) may take time, but status updates will be sent."
+        "✅ Features:\n"
+        " • /import <link> → Import and extract file (zip, rar, 7z)\n"
+        " • /search <name> → Search in extracted CSV\n"
+        " • Replies to any text (catch-all)\n"
+        " • Status updates on import/extraction\n\n"
+        "📌 Try sending /import or any message!"
     )
     bot.reply_to(message, welcome_text)
 
-@bot.message_handler(commands=["import"])
+@bot.message_handler(commands=['import'])
 def import_file(message):
     try:
         url = message.text.replace("/import", "").strip()
         if not url:
-            bot.reply_to(message, "❌ Please provide a file link.\nExample:\n`/import https://drive.google.com/uc?id=FILE_ID`", parse_mode="Markdown")
+            bot.reply_to(message, "❌ Please provide a file link. Example:\n`/import https://drive.google.com/uc?id=FILE_ID`", parse_mode="Markdown")
             return
 
         bot.reply_to(message, "⏳ Downloading file...")
@@ -114,20 +98,19 @@ def import_file(message):
             bot.reply_to(message, "❌ No CSV file found after extraction.")
             return
 
-        # Normalize CSV and save cleaned version
         df = pd.read_csv(csv_path, dtype=str)
         df = df.applymap(clean_number)
         df.to_csv(CSV_FILE, index=False)
 
-        bot.reply_to(message, f"✅ File imported and CSV ready!\nLoaded rows: {len(df)}")
+        bot.reply_to(message, f"✅ File imported and CSV ready! Rows loaded: {len(df)}")
     except Exception as e:
         bot.reply_to(message, f"⚠️ Import failed: {e}")
 
-@bot.message_handler(commands=["search"])
+@bot.message_handler(commands=['search'])
 def search(message):
     query = message.text.replace("/search", "").strip()
     if not query:
-        bot.reply_to(message, "❌ Please provide a search term.\nExample:\n`/search John Doe`", parse_mode="Markdown")
+        bot.reply_to(message, "❌ Provide a search term. Example:\n`/search John Doe`", parse_mode="Markdown")
         return
 
     try:
@@ -148,9 +131,30 @@ def search(message):
     except Exception as e:
         bot.reply_to(message, f"⚠️ Search failed: {e}")
 
+# Catch-all handler for any text
+@bot.message_handler(func=lambda message: True)
+def echo_all(message):
+    bot.reply_to(message, f"📩 You said: {message.text}")
+
 # =====================
-# MAIN ENTRY
+# WEBHOOK ROUTE
+# =====================
+
+@app.route(f"/{BOT_TOKEN}", methods=['POST'])
+def webhook():
+    json_str = request.get_data().decode("utf-8")
+    print("📩 Incoming update:", json_str, flush=True)  # Debug logs
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "ok", 200
+
+# Root for testing
+@app.route("/", methods=['GET'])
+def index():
+    return "Bot is running fine ✅"
+
+# =====================
+# MAIN
 # =====================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
